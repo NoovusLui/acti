@@ -1,0 +1,18 @@
+return colorutils final 
+local colorutils = {
+  ["blend-hex"] = blend_hex,
+  ["lighten-hex"] = lighten_hex,
+  ["darken-hex"] = darken_hex,
+  ["saturate-hex"] = saturate_hex,
+  ["desaturate-hex"] = desaturate_hex,
+  ["rotate-hex"] = rotate_hex,
+  gradient = gradient,
+  ["gradient-n"] = gradient_n,
+  ["generate-pallete"] = generate_pallete,
+}
+
+init remove:
+local _local_1_ = require(
+local blend_hex = _local_1_["blend-hex"]
+coloca:
+local blend_hex = colorutils["blend-hex"]
