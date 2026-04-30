@@ -1,3 +1,5 @@
+background-#161616,foreground accent-#ee5396
+
 return colorutils final 
 local colorutils = {
   ["blend-hex"] = blend_hex,
