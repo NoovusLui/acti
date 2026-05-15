@@ -1,0 +1,1147 @@
+gpu--------------------------------------------------------------------------------------
+#!/usr/bin/env python3
+# ----------------------------------------------------------------------------
+# WAYBAR GPU MODULE
+# ----------------------------------------------------------------------------
+# Visualizes GPU stats including VRAM layout and Die temperature.
+# Designed for Nvidia GPUs (uses nvidia-smi).
+# ----------------------------------------------------------------------------
+
+import json
+import subprocess
+import os
+import pathlib
+
+# ---------------------------------------------------
+# CONFIGURATION
+# ---------------------------------------------------
+GPU_ICON = "󰢮"
+TOOLTIP_WIDTH = 31
+
+# ---------------------------------------------------
+# THEME & COLORS
+# ---------------------------------------------------
+try:
+    import tomllib
+except ImportError:
+    tomllib = None
+
+def load_theme_colors():
+    theme_path = pathlib.Path.home() / ".config/waybar/colors.toml"
+    defaults = {
+        "black": "#000000", "red": "#ff0000", "green": "#00ff00", "yellow": "#ffff00",
+        "blue": "#0000ff", "magenta": "#ff00ff", "cyan": "#00ffff", "white": "#ffffff",
+        "bright_black": "#555555", "bright_red": "#ff5555", "bright_green": "#55ff55",
+        "bright_yellow": "#ffff55", "bright_blue": "#5555ff", "bright_magenta": "#ff55ff",
+        "bright_cyan": "#55ffff", "bright_white": "#ffffff"
+    }
+    if not tomllib or not theme_path.exists(): return defaults
+    try:
+        data = tomllib.loads(theme_path.read_text())
+        colors = data.get("colors", {})
+        normal = colors.get("normal", {})
+        bright = colors.get("bright", {})
+        return {**defaults, **normal, **{f"bright_{k}": v for k, v in bright.items()}}
+    except Exception: return defaults
+
+COLORS = load_theme_colors()
+
+COLOR_TABLE = [
+    {"color": COLORS["blue"],           "cpu_gpu_temp": (0, 35),   "gpu_power": (0.0, 20)},
+    {"color": COLORS["cyan"],           "cpu_gpu_temp": (36, 45),  "gpu_power": (21, 40)},
+    {"color": COLORS["green"],          "cpu_gpu_temp": (46, 54),  "gpu_power": (41, 60)},
+    {"color": COLORS["yellow"],         "cpu_gpu_temp": (55, 65),  "gpu_power": (61, 75)},
+    {"color": COLORS["bright_yellow"],  "cpu_gpu_temp": (66, 75),  "gpu_power": (76, 85)},
+    {"color": COLORS["bright_red"],     "cpu_gpu_temp": (76, 85),  "gpu_power": (86, 95)},
+    {"color": COLORS["red"],            "cpu_gpu_temp": (86, 999), "gpu_power": (96, 999)}
+]
+
+def get_color(value, metric_type):
+    try: value = float(value)
+    except: return "#ffffff"
+    for entry in COLOR_TABLE:
+        if metric_type in entry:
+            low, high = entry[metric_type]
+            if low <= value <= high: return entry["color"]
+    return COLOR_TABLE[-1]["color"]
+
+# ---------------------------------------------------
+# DATA EXTRACTION
+# ---------------------------------------------------
+gpu_percent, gpu_temp, gpu_power, fan_speed = 0, 0, 0.0, 0
+vram_used, vram_total = 0, 0
+gpu_name = "Nvidia GPU"
+gpu_tdp = 250.0 # Default fallback
+
+try:
+    # Get Name and Power Limit
+    info_cmd = ["nvidia-smi", "--query-gpu=name,power.limit", "--format=csv,noheader,nounits"]
+    info_out = subprocess.check_output(info_cmd, text=True).strip().split(',')
+    if len(info_out) >= 2:
+        gpu_name = info_out[0].strip()
+        try: gpu_tdp = float(info_out[1].strip())
+        except: pass
+
+    # Get Stats
+    cmd = ["nvidia-smi", "--query-gpu=utilization.gpu,temperature.gpu,power.draw,fan.speed,memory.used,memory.total", "--format=csv,noheader,nounits"]
+    output = subprocess.check_output(cmd, text=True).strip()
+    m = [x.strip() for x in output.split(",")]
+    
+    gpu_percent = int(m[0])
+    gpu_temp = int(m[1])
+    gpu_power = float(m[2])
+    fan_speed = int(m[3]) if m[3] != '[N/A]' else 0
+    vram_used = int(m[4])
+    vram_total = int(m[5])
+except Exception:
+    pass
+
+vram_pct = (vram_used / vram_total * 100) if vram_total > 0 else 0
+pwr_pct = (gpu_power / gpu_tdp * 100) if gpu_tdp > 0 else 0
+
+# ---------------------------------------------------
+# GRAPHIC GENERATOR
+# ---------------------------------------------------
+def get_vram_color(usage, level):
+    if usage > (level - 1) * (100 / 6):
+        return get_color(usage, 'gpu_power')
+    return COLORS["white"]
+
+def get_bar_segment(val, threshold):
+    char_map = {80: "███", 60: "▅▅▅", 40: "▃▃▃", 20: "▂▂▂", 0: "───"}
+    color = get_color(val, 'gpu_power') if val > threshold else "#555555"
+    return f"<span foreground='{color}'>{char_map[threshold]}</span>"
+
+die_temp_color = get_color(gpu_temp, 'cpu_gpu_temp')
+f_c = COLORS["white"]
+bg = lambda t: f"<span foreground='{die_temp_color}'>{t}</span>"
+
+# VRAM Chips
+vc = [get_vram_color(vram_pct, i) for i in range(1, 7)]
+
+# Internal bars
+bars = []
+for thresh in [80, 60, 40, 20, 0]:
+    bars.append(f"{get_bar_segment(gpu_percent, thresh)} {get_bar_segment(pwr_pct, thresh)} {get_bar_segment(fan_speed, thresh)}")
+
+graphic = [
+    f"      <span foreground='{f_c}'>╭─────────────────╮</span>",
+    f" <span foreground='{f_c}'>=</span><span foreground='{vc[5]}'>███</span><span foreground='{f_c}'>=│</span>{bg('░░░░░░░░░░░░░░░░░')}<span foreground='{f_c}'>│=</span><span foreground='{vc[5]}'>███</span><span foreground='{f_c}'>=</span>",
+    f" <span foreground='{f_c}'>=</span><span foreground='{vc[4]}'>███</span><span foreground='{f_c}'>=│</span>{bg('░░')}  󰓅      󰈐  {bg('░░')}<span foreground='{f_c}'>│=</span><span foreground='{vc[4]}'>███</span><span foreground='{f_c}'>=</span>",
+    f"      <span foreground='{f_c}'>│</span>{bg('░░')} {bars[0]} {bg('░░')}<span foreground='{f_c}'>│</span>  ",
+    f" <span foreground='{f_c}'>=</span><span foreground='{vc[3]}'>███</span><span foreground='{f_c}'>=│</span>{bg('░░')} {bars[1]} {bg('░░')}<span foreground='{f_c}'>│=</span><span foreground='{vc[3]}'>███</span><span foreground='{f_c}'>=</span>",
+    f" <span foreground='{f_c}'>=</span><span foreground='{vc[2]}'>███</span><span foreground='{f_c}'>=│</span>{bg('░░')} {bars[2]} {bg('░░')}<span foreground='{f_c}'>│=</span><span foreground='{vc[2]}'>███</span><span foreground='{f_c}'>=</span>",
+    f"      <span foreground='{f_c}'>│</span>{bg('░░')} {bars[3]} {bg('░░')}<span foreground='{f_c}'>│</span>  ",
+    f" <span foreground='{f_c}'>=</span><span foreground='{vc[1]}'>███</span><span foreground='{f_c}'>=│</span>{bg('░░')} {bars[4]} {bg('░░')}<span foreground='{f_c}'>│=</span><span foreground='{vc[1]}'>███</span><span foreground='{f_c}'>=</span>",
+    f" <span foreground='{f_c}'>=</span><span foreground='{vc[0]}'>███</span><span foreground='{f_c}'>=│</span>{bg('░░░░░░░░░░░░░░░░░')}<span foreground='{f_c}'>│=</span><span foreground='{vc[0]}'>███</span><span foreground='{f_c}'>=</span>",
+    f"      <span foreground='{f_c}'>╰─────────────────╯</span>"
+]
+
+# ---------------------------------------------------
+# TOOLTIP
+# ---------------------------------------------------
+tooltip_lines = []
+tooltip_lines.extend([
+    f"<span foreground='{COLORS['yellow']}'>{GPU_ICON}</span> <span foreground='{COLORS['yellow']}'>GPU</span> - {gpu_name}",
+    "─" * 30,
+    f" | Temperature: <span foreground='{die_temp_color}'>{gpu_temp}°C</span>",
+    f"󰘚 | V-RAM: <span foreground='{get_color(vram_pct, 'gpu_power')}'>{vram_used} / {vram_total} MB</span>",
+    f" | Power: <span foreground='{get_color(pwr_pct, 'gpu_power')}'>{gpu_power:.1f}W</span>",
+    f"󰓅 | Utlization: <span foreground='{get_color(gpu_percent, 'gpu_power')}'>{gpu_percent}%</span>",
+    f"󰈐 | Fan Speed: <span foreground='{get_color(fan_speed, 'gpu_power')}'>{fan_speed}%</span>",
+    "",
+    "\n".join(graphic),
+    ""
+])
+
+tooltip_lines.append("Top GPU Processes:")
+try:
+    cmd_procs = ["nvidia-smi", "--query-compute-apps=pid,process_name,used_memory", "--format=csv,noheader,nounits"]
+    output_procs = subprocess.check_output(cmd_procs, text=True).strip()
+    
+    procs = []
+    if output_procs:
+        for line in output_procs.split('\n'):
+            parts = [x.strip() for x in line.split(',')]
+            if len(parts) >= 3:
+                name = os.path.basename(parts[1].replace('\\', '/'))
+                try: mem = int(parts[2])
+                except: mem = 0
+                procs.append({'name': name, 'mem': mem})
+    
+    procs.sort(key=lambda x: x['mem'], reverse=True)
+    for p in procs[:4]:
+        name = p['name']
+        if len(name) > 12: name = name[:11] + "…"
+        mem_p = (p['mem'] / vram_total * 100) if vram_total > 0 else 0
+        color = get_color(mem_p, 'gpu_power')
+        tooltip_lines.append(f" • {name:<12} <span foreground='{color}'>󰘚 {p['mem']}MB</span>")
+except: pass
+
+tooltip_lines.extend([
+    "",
+    f"<span foreground='{COLORS['white']}'>{'┈' * TOOLTIP_WIDTH}</span>",
+    "󰍽 LMB: Btop"
+])
+
+click_type = os.environ.get("WAYBAR_CLICK_TYPE")
+if click_type == "right":
+    # Replace with your preferred control app
+    pass 
+
+print(json.dumps({
+    "text": f"<span size='21000' rise='-3000'>{GPU_ICON}</span> <span foreground='{die_temp_color}'>{gpu_temp}°C</span>",
+    "tooltip": f"<span size='14000' font='JetBrainsMono Nerd Font'>{"\n".join(tooltip_lines)}</span>",
+    "markup": "pango",
+    "class": "gpu"
+}))
+-----------------------------------------------------------------------------
+storage
+#!/usr/bin/env python3
+# ----------------------------------------------------------------------------
+# WAYBAR STORAGE MODULE
+# ----------------------------------------------------------------------------
+# Auto-detects mounted physical drives and displays usage in a sleek dashboard.
+# Features:
+# - Dynamic drive detection (ignores snaps, loops, etc.)
+# - Real-time I/O speeds (Read/Write)
+# - Drive temperature monitoring (requires lm_sensors/smartctl)
+# - Health status via smartctl (requires sudo)
+# ----------------------------------------------------------------------------
+
+import json
+import subprocess
+import os
+import psutil
+import re
+import time
+import pickle
+from collections import deque
+import math
+import pathlib
+
+# ---------------------------------------------------
+# CONFIGURATION
+# ---------------------------------------------------
+SSD_ICON = ""
+HDD_ICON = "󰋊"
+HISTORY_FILE = "/tmp/waybar_storage_history.pkl"
+TOOLTIP_WIDTH = 45
+
+# ---------------------------------------------------
+# THEME & COLORS
+# ---------------------------------------------------
+try:
+    import tomllib
+except ImportError:
+    tomllib = None
+
+def load_theme_colors():
+    # Tries to load from a standard waybar config location
+    theme_path = pathlib.Path.home() / ".config/waybar/colors.toml"
+    
+    defaults = {
+        "black": "#000000", "red": "#ff0000", "green": "#00ff00", "yellow": "#ffff00",
+        "blue": "#0000ff", "magenta": "#ff00ff", "cyan": "#00ffff", "white": "#ffffff",
+        "bright_black": "#555555", "bright_red": "#ff5555", "bright_green": "#55ff55",
+        "bright_yellow": "#ffff55", "bright_blue": "#5555ff", "bright_magenta": "#ff55ff",
+        "bright_cyan": "#55ffff", "bright_white": "#ffffff"
+    }
+
+    if not tomllib or not theme_path.exists():
+        return defaults
+
+    try:
+        data = tomllib.loads(theme_path.read_text())
+        colors = data.get("colors", {})
+        normal = colors.get("normal", {})
+        bright = colors.get("bright", {})
+        return {**defaults, **normal, **{f"bright_{k}": v for k, v in bright.items()}}
+    except Exception:
+        return defaults
+
+COLORS = load_theme_colors()
+
+SECTION_COLORS = {
+    "Storage": {"icon": COLORS["blue"], "text": COLORS["blue"]},
+}
+
+COLOR_TABLE = [
+    {"color": COLORS["blue"],           "mem_storage": (0.0, 10),  "drive_temp": (0, 35)},
+    {"color": COLORS["cyan"],           "mem_storage": (10.0, 20), "drive_temp": (36, 45)},
+    {"color": COLORS["green"],          "mem_storage": (20.0, 40), "drive_temp": (46, 54)},
+    {"color": COLORS["yellow"],         "mem_storage": (40.0, 60), "drive_temp": (55, 60)},
+    {"color": COLORS["bright_yellow"],  "mem_storage": (60.0, 80), "drive_temp": (61, 70)},
+    {"color": COLORS["bright_red"],     "mem_storage": (80.0, 90), "drive_temp": (71, 80)},
+    {"color": COLORS["red"],            "mem_storage": (90.0,100), "drive_temp": (81, 999)}
+]
+
+def get_color(value, metric_type):
+    if value is None: return "#ffffff"
+    try: value = float(value)
+    except ValueError: return "#ffffff"
+    for entry in COLOR_TABLE:
+        if metric_type in entry:
+            low, high = entry[metric_type]
+            if low <= value <= high: return entry["color"]
+    return COLOR_TABLE[-1]["color"]
+
+# ---------------------------------------------------
+# HISTORY & UTILS
+# ---------------------------------------------------
+def format_compact(val, suffix=""):
+    if val is None: return f"0{suffix}"
+    try: val = float(val)
+    except: return f"0{suffix}"
+    if val < 1024: return f"{val:.0f}{suffix}"
+    val /= 1024
+    if val < 1024: return f"{val:.1f}K{suffix}"
+    val /= 1024
+    if val < 1024: return f"{val:.1f}M{suffix}"
+    val /= 1024
+    return f"{val:.1f}G{suffix}"
+
+def load_history():
+    try:
+        with open(HISTORY_FILE, 'rb') as f:
+            data = pickle.load(f)
+            if not isinstance(data, dict): return {'io': {}, 'timestamp': 0}
+            return data
+    except: return {'io': {}, 'timestamp': 0}
+
+def save_history(data):
+    try:
+        with open(HISTORY_FILE, 'wb') as f: pickle.dump(data, f)
+    except: pass
+
+# ---------------------------------------------------
+# HARDWARE SENSORS
+# ---------------------------------------------------
+def get_drive_temp(mountpoint):
+    """
+    Attempts to find drive temperature via psutil -> device -> hwmon/smartctl.
+    """
+    try:
+        partitions = psutil.disk_partitions()
+        partition = next((p for p in partitions if p.mountpoint == mountpoint), None)
+        if not partition: return None
+        
+        device_path = partition.device
+        disk_name = os.path.basename(device_path)
+        
+        # Handle mapper/dm devices
+        if disk_name.startswith("dm-"):
+            try:
+                slaves = os.listdir(f"/sys/class/block/{disk_name}/slaves")
+                if slaves: disk_name = slaves[0] 
+            except: pass
+
+        # Handle NVMe
+        if disk_name.startswith("nvme"):
+            disk_name = re.sub(r'p\d+$', '', disk_name)
+        else:
+            disk_name = re.sub(r'\d+$', '', disk_name)
+            
+        # Try sensors command (lm_sensors)
+        try:
+            output = subprocess.check_output(["sensors", "-j"], text=True, stderr=subprocess.DEVNULL)
+            data = json.loads(output)
+            # Heuristic search in sensors output
+            for key, val in data.items():
+                # Check for nvme or scsi/sata adapter keys that might match
+                if disk_name in key or (disk_name.startswith("nvme") and "nvme" in key):
+                     for sub_k, sub_v in val.items():
+                         if "temp1_input" in sub_k: return int(sub_v)
+        except: pass
+
+        # Fallback: smartctl (requires sudo NOPASSWD)
+        try:
+            cmd = ["sudo", "smartctl", "-A", f"/dev/{disk_name}", "-j"]
+            result = subprocess.run(cmd, text=True, capture_output=True)
+            if result.stdout:
+                data = json.loads(result.stdout)
+                return data.get("temperature", {}).get("current")
+        except: pass
+
+    except Exception:
+        pass
+    return None
+
+def get_smart_info(mountpoint):
+    """
+    Fetches basic health info via smartctl.
+    """
+    health, lifespan, tbw = "N/A", "N/A", "N/A"
+    try:
+        partitions = psutil.disk_partitions()
+        partition = next((p for p in partitions if p.mountpoint == mountpoint), None)
+        if not partition: return health, lifespan, tbw
+        
+        disk_name = os.path.basename(partition.device)
+        # Simplify disk name logic similar to above...
+        
+        cmd = ["sudo", "smartctl", "-a", "-j", f"/dev/{disk_name}"]
+        result = subprocess.run(cmd, text=True, capture_output=True)
+        if result.stdout:
+            data = json.loads(result.stdout)
+            passed = data.get("smart_status", {}).get("passed")
+            health = "OK" if passed else "FAIL" if passed is False else "N/A"
+            
+            # NVMe specific
+            if "nvme_smart_health_information_log" in data:
+                nvme = data["nvme_smart_health_information_log"]
+                used = nvme.get("percentage_used")
+                if used is not None: lifespan = f"{max(0, 100 - used)}%"
+                duw = nvme.get("data_units_written")
+                if duw: tbw = f"{(duw * 512000) / 1e12:.1f} TB"
+    except: pass
+    return health, lifespan, tbw
+
+# ---------------------------------------------------
+# MAIN LOGIC
+# ---------------------------------------------------
+def get_drives():
+    drives = []
+    # Auto-detect physical drives
+    for p in psutil.disk_partitions():
+        if any(x in p.mountpoint for x in ['/snap', '/boot', '/docker', '/var', '/run', '/sys', '/proc', '/dev']): continue
+        if any(x in p.device for x in ['/loop']): continue
+        
+        if p.fstype in ['ext4', 'btrfs', 'xfs', 'ntfs', 'vfat', 'apfs', 'zfs', 'exfat']:
+            name = "Root" if p.mountpoint == "/" else os.path.basename(p.mountpoint)
+            icon = SSD_ICON # Default icon
+            drives.append((name, p.mountpoint, icon))
+    return drives
+
+def main():
+    history = load_history()
+    last_io = history.get('io', {})
+    last_time = history.get('timestamp', 0)
+    current_time = time.time()
+    
+    try: current_io = psutil.disk_io_counters(perdisk=True)
+    except: current_io = {}
+
+    drives = get_drives()
+    storage_entries = []
+    
+    # Map mountpoints to device names for I/O lookup
+    try:
+        partitions = psutil.disk_partitions()
+        mount_map = {p.mountpoint: os.path.basename(p.device) for p in partitions}
+    except: mount_map = {}
+
+    root_usage = 0
+
+    for name, mountpoint, icon in drives:
+        try:
+            usage = psutil.disk_usage(mountpoint)
+            used_pct = int(usage.percent)
+            total_tb = usage.total / (1024**4)
+            
+            if mountpoint == "/": root_usage = used_pct
+            
+            temp = get_drive_temp(mountpoint)
+            health, lifespan, tbw = get_smart_info(mountpoint)
+            
+            # I/O Speed
+            r_spd, w_spd = 0, 0
+            dev_name = mount_map.get(mountpoint)
+            if dev_name and dev_name in current_io and dev_name in last_io:
+                curr, prev = current_io[dev_name], last_io[dev_name]
+                dt = current_time - last_time
+                if dt > 0:
+                    r_spd = (curr.read_bytes - prev.read_bytes) / dt
+                    w_spd = (curr.write_bytes - prev.write_bytes) / dt
+
+            storage_entries.append({
+                "name": name, "icon": icon, "total": total_tb, "pct": used_pct,
+                "temp": temp, "health": health, "lifespan": lifespan, "tbw": tbw,
+                "r_spd": r_spd, "w_spd": w_spd
+            })
+        except: continue
+
+    # ---------------------------------------------------
+    # TOOLTIP
+    # ---------------------------------------------------
+    lines = []
+    lines.append(f"<span foreground='{SECTION_COLORS['Storage']['text']}'>{SSD_ICON} Storage Dashboard</span>")
+    lines.append(f"<span foreground='{COLORS['white']}'>{'─' * TOOLTIP_WIDTH}</span>")
+
+    for entry in storage_entries:
+        c_temp = get_color(entry['temp'], "drive_temp") if entry['temp'] else COLORS["bright_black"]
+        c_usage = get_color(entry['pct'], "mem_storage")
+        
+        # Header: Icon Name Size
+        size_str = f"{entry['total']:.1f}TB"
+        lines.append(f"<span size='14000'><span foreground='{c_temp}'>{entry['icon']}</span> <span foreground='{COLORS['white']}'><b>{entry['name']}</b></span> - {size_str}</span>")
+        
+        # Temp & Health
+        temp_str = f"{entry['temp']}°C" if entry['temp'] else "N/A"
+        health_c = COLORS['green'] if entry['health'] == "OK" else COLORS['red']
+        
+        meta_info = []
+        if entry['lifespan'] != "N/A": meta_info.append(f"Life: {entry['lifespan']}")
+        if entry['tbw'] != "N/A": meta_info.append(f"TBW: {entry['tbw']}")
+        meta_str = " | ".join(meta_info)
+        
+        lines.append(f" <span foreground='{c_temp}'>{temp_str}</span>  <span foreground='{health_c}'>♥ {entry['health']}</span>  <span size='small'>{meta_str}</span>")
+        
+        # Speed
+        rs = format_compact(entry['r_spd'], "/s")
+        ws = format_compact(entry['w_spd'], "/s")
+        lines.append(f"<span size='small'>R: <span foreground='{COLORS['blue']}'>{rs}</span>  W: <span foreground='{COLORS['green']}'>{ws}</span></span>")
+        
+        # Bar
+        bar_w = 25
+        filled = int((entry['pct'] / 100) * bar_w)
+        bar = f"<span foreground='{c_usage}'>{'█'*filled}</span><span foreground='{COLORS['bright_black']}'>{'░'*(bar_w-filled)}</span>"
+        lines.append(f"{bar} {entry['pct']}%")
+        lines.append("")
+
+    lines.append(f"<span foreground='{COLORS['white']}'>{'┈' * TOOLTIP_WIDTH}</span>")
+    lines.append("🖱️ LMB: File Manager")
+
+    save_history({'io': current_io, 'timestamp': current_time})
+
+    print(json.dumps({
+        "text": f"{SSD_ICON} <span foreground='{get_color(root_usage,'mem_storage')}'>{root_usage}%</span>",
+        "tooltip": "\n".join(lines),
+        "markup": "pango",
+        "class": "storage"
+    }))
+
+if __name__ == "__main__":
+    main()
+---------------------------------------------------------------------------
+cpu
+#!/usr/bin/env python3
+# ----------------------------------------------------------------------------
+# WAYBAR CPU MODULE
+# ----------------------------------------------------------------------------
+# CPU monitoring script for waybar.
+# Features:
+# - Per-core usage visualization (Die layout)
+# - Power usage (RAPL)
+# - Temperature monitoring
+# - Top processes consuming CPU
+# ----------------------------------------------------------------------------
+
+import json
+import psutil
+import subprocess
+import re
+import os
+import time
+import shutil
+import pickle
+from collections import deque
+import math
+import pathlib
+import glob
+
+# ---------------------------------------------------
+# CONFIGURATION
+# ---------------------------------------------------
+CPU_ICON_GENERAL = ""
+HISTORY_FILE = "/tmp/waybar_cpu_history.pkl"
+TOOLTIP_WIDTH = 50
+
+# ---------------------------------------------------
+# THEME & COLORS
+# ---------------------------------------------------
+try:
+    import tomllib
+except ImportError:
+    tomllib = None
+
+def load_theme_colors():
+    theme_path = pathlib.Path.home() / ".config/waybar/colors.toml"
+    defaults = {
+        "black": "#000000", "red": "#ff0000", "green": "#00ff00", "yellow": "#ffff00",
+        "blue": "#0000ff", "magenta": "#ff00ff", "cyan": "#00ffff", "white": "#ffffff",
+        "bright_black": "#555555", "bright_red": "#ff5555", "bright_green": "#55ff55",
+        "bright_yellow": "#ffff55", "bright_blue": "#5555ff", "bright_magenta": "#ff55ff",
+        "bright_cyan": "#55ffff", "bright_white": "#ffffff"
+    }
+    if not tomllib or not theme_path.exists(): return defaults
+    try:
+        data = tomllib.loads(theme_path.read_text())
+        colors = data.get("colors", {})
+        normal = colors.get("normal", {})
+        bright = colors.get("bright", {})
+        return {**defaults, **normal, **{f"bright_{k}": v for k, v in bright.items()}}
+    except Exception: return defaults
+
+COLORS = load_theme_colors()
+SECTION_COLORS = {"CPU": {"icon": COLORS["red"], "text": COLORS["red"]}}
+
+COLOR_TABLE = [
+    {"color": COLORS["blue"],           "cpu_gpu_temp": (0, 35),   "cpu_power": (0.0, 30)},
+    {"color": COLORS["cyan"],           "cpu_gpu_temp": (36, 45),  "cpu_power": (31.0, 60)},
+    {"color": COLORS["green"],          "cpu_gpu_temp": (46, 54),  "cpu_power": (61.0, 90)},
+    {"color": COLORS["yellow"],         "cpu_gpu_temp": (55, 65),  "cpu_power": (91.0, 120)},
+    {"color": COLORS["bright_yellow"],  "cpu_gpu_temp": (66, 75),  "cpu_power": (121.0,150)},
+    {"color": COLORS["bright_red"],     "cpu_gpu_temp": (76, 85),  "cpu_power": (151.0,180)},
+    {"color": COLORS["red"],            "cpu_gpu_temp": (86, 999), "cpu_power": (181.0,999)}
+]
+
+def get_color(value, metric_type):
+    if value is None: return "#ffffff"
+    try: value = float(value)
+    except ValueError: return "#ffffff"
+    for entry in COLOR_TABLE:
+        if metric_type in entry:
+            low, high = entry[metric_type]
+            if low <= value <= high: return entry["color"]
+    return COLOR_TABLE[-1]["color"]
+
+# ---------------------------------------------------
+# HARDWARE DETECTION
+# ---------------------------------------------------
+def get_cpu_name():
+    try:
+        with open("/proc/cpuinfo", "r") as f:
+            for line in f:
+                if "model name" in line:
+                    return line.split(":")[1].strip()
+    except:
+        pass
+    return "Unknown CPU"
+
+def get_rapl_path():
+    # Find the energy_uj file for package-0 (CPU)
+    base = "/sys/class/powercap"
+    if not os.path.exists(base): return None
+    
+    # Search for intel-rapl or similar directories
+    # Usually intel-rapl:0 is the package
+    paths = glob.glob(f"{base}/*/energy_uj")
+    for p in paths:
+        if "intel-rapl:0" in p or "package" in p:
+            return p
+    # Fallback to first found
+    return paths[0] if paths else None
+
+# ---------------------------------------------------
+# HISTORY
+# ---------------------------------------------------
+def load_history():
+    try:
+        with open(HISTORY_FILE, 'rb') as f:
+            return pickle.load(f)
+    except:
+        return {'cpu': deque(maxlen=TOOLTIP_WIDTH), 'per_core': {}}
+
+def save_history(cpu_hist, per_core_hist):
+    try:
+        with open(HISTORY_FILE, 'wb') as f:
+            pickle.dump({'cpu': cpu_hist, 'per_core': per_core_hist}, f)
+    except: pass
+
+# ---------------------------------------------------
+# MAIN LOGIC
+# ---------------------------------------------------
+history = load_history()
+cpu_history = history.get('cpu', deque(maxlen=TOOLTIP_WIDTH))
+per_core_history = history.get('per_core', {})
+
+cpu_name = get_cpu_name()
+max_cpu_temp = 0
+
+# Temperature
+try:
+    temps = psutil.sensors_temperatures() or {}
+    # Try common labels
+    for label in ["k10temp", "coretemp", "zenpower"]:
+        if label in temps:
+            for t in temps[label]:
+                if t.current > max_cpu_temp:
+                    max_cpu_temp = int(t.current)
+except: pass
+
+# Frequency
+current_freq = max_freq = 0
+try:
+    cpu_info = psutil.cpu_freq(percpu=False)
+    if cpu_info:
+        current_freq = cpu_info.current or 0
+        max_freq = cpu_info.max or 0
+except: pass
+
+# Power (RAPL)
+cpu_power = 0.0
+rapl_path = get_rapl_path()
+if rapl_path:
+    try:
+        with open(rapl_path, "r") as f: energy1 = int(f.read().strip())
+        time.sleep(0.05)
+        with open(rapl_path, "r") as f: energy2 = int(f.read().strip())
+        
+        delta = energy2 - energy1
+        # Handle overflow
+        if delta < 0: 
+            # Try to find max range
+            max_f = os.path.join(os.path.dirname(rapl_path), "max_energy_range_uj")
+            if os.path.exists(max_f):
+                with open(max_f, "r") as f: max_e = int(f.read().strip())
+                delta = (max_e + energy2) - energy1
+            else:
+                delta = (2**32 + energy2) - energy1
+                
+        cpu_power = (delta / 1_000_000) / 0.05
+    except: pass
+
+cpu_percent = psutil.cpu_percent(interval=0.1)
+cpu_history.append(cpu_percent)
+
+# Per Core
+per_core = psutil.cpu_percent(interval=0.1, percpu=True)
+decay_factor = 0.95
+for i, usage in enumerate(per_core):
+    if i not in per_core_history:
+        per_core_history[i] = usage
+    else:
+        per_core_history[i] = (per_core_history[i] * decay_factor) + (usage * (1 - decay_factor))
+
+def get_core_color(usage):
+    if usage < 20: return "#81c8be"
+    elif usage < 40: return "#a6d189"
+    elif usage < 60: return "#e5c890"
+    elif usage < 80: return "#ef9f76"
+    elif usage < 95: return "#ea999c"
+    else: return "#e78284"
+
+# ---------------------------------------------------
+# TOOLTIP
+# ---------------------------------------------------
+tooltip_lines = []
+
+tooltip_lines.append(
+    f"<span foreground='{SECTION_COLORS['CPU']['icon']}'>{CPU_ICON_GENERAL}</span> "
+    f"<span foreground='{SECTION_COLORS['CPU']['text']}'>CPU</span> - {cpu_name}:"
+)
+
+cpu_rows = [
+    ("󱎫", f"Clock Speed: <span foreground='{get_color((current_freq/max_freq*100) if max_freq > 0 else 0, 'cpu_power')}'>{current_freq/1000:.2f} GHz</span> / {max_freq/1000:.2f} GHz"),
+    ("", f"Temperature: <span foreground='{get_color(max_cpu_temp,'cpu_gpu_temp')}'>{max_cpu_temp}°C</span>"),
+    ("", f"Power: <span foreground='{get_color(cpu_power,'cpu_power')}'>{cpu_power:.1f} W</span>"),
+    ("󰓅", f"Utilization: <span foreground='{get_color(cpu_percent,'cpu_power')}'>{cpu_percent:.0f}%</span>")
+]
+
+max_line_len = max(len(re.sub(r'<.*?>','',line_text)) for _, line_text in cpu_rows) + 5
+max_line_len = max(max_line_len, 29)
+tooltip_lines.append("─" * max_line_len)
+for icon, text_row in cpu_rows:
+    tooltip_lines.append(f"{icon} | {text_row}")
+
+# CPU Die Visualization
+cpu_viz_width = 25
+center_padding = " " * int((max_line_len - cpu_viz_width) // 2)
+substrate_color = get_color(max_cpu_temp, 'cpu_gpu_temp')
+border_color = COLORS['white']
+
+tooltip_lines.append("")
+tooltip_lines.append(f"{center_padding}  <span foreground='{border_color}'>╭──┘└────┘⠿└─────┘└─╮</span>")
+tooltip_lines.append(f"{center_padding}  <span foreground='{border_color}'>┘</span><span foreground='{substrate_color}'>░░░░░░░░░░░░░░░░░░░</span><span foreground='{border_color}'>└</span>")
+
+# Grid layout for cores (adjust rows/cols based on core count if needed, fixed 6x4 here)
+row_patterns = [("┐", "┌"), ("│", "│"), ("┘", "└")] * 2
+for row in range(6):
+    start_char, end_char = row_patterns[row]
+    line_parts = [f"{center_padding}  <span foreground='{border_color}'>{start_char}</span><span foreground='{substrate_color}'>░░</span>"]
+    for col in range(4):
+        core_idx = row * 4 + col
+        if core_idx < len(per_core):
+            usage = per_core[core_idx]
+            color = get_core_color(usage)
+            circle = "●" if usage >= 10 else "○"
+            line_parts.append(f"<span foreground='{border_color}'>[</span><span foreground='{color}'>{circle}</span><span foreground='{border_color}'>]</span>")
+        else:
+            line_parts.append(f"<span foreground='{substrate_color}'>░░░</span>")
+        if col < 3: line_parts.append(f"<span foreground='{substrate_color}'>░</span>")
+    line_parts.append(f"<span foreground='{substrate_color}'>░░</span><span foreground='{border_color}'>{end_char}</span>")
+    tooltip_lines.append("".join(line_parts))
+
+tooltip_lines.append(f"{center_padding}  <span foreground='{border_color}'>┐</span><span foreground='{substrate_color}'>░░░░░░░░░░░░░░░░░░░</span><span foreground='{border_color}'>┌</span>")
+tooltip_lines.append(f"{center_padding}  <span foreground='{border_color}'>╰──┐┌────┐⣶┌─────┐┌─╯</span>")
+
+# Top Processes
+tooltip_lines.append("")
+tooltip_lines.append("Top Current Processes:")
+try:
+    ps_cmd = ["ps", "-eo", "pcpu,comm,args", "--sort=-pcpu", "--no-headers"]
+    ps_output = subprocess.check_output(ps_cmd, text=True).strip()
+    count = 0
+    for line in ps_output.split('\n'):
+        if count >= 3: break
+        parts = line.strip().split(maxsplit=2)
+        if len(parts) >= 2:
+            try:
+                usage = float(parts[0])
+                name = parts[1]
+                if "waybar" in parts[2] if len(parts)>2 else "": continue
+                if len(name) > 15: name = name[:14] + "…"
+                color = get_core_color(usage)
+                tooltip_lines.append(f" • {name:<15} <span foreground='{color}'> {usage:>5.1f}%</span>")
+                count += 1
+            except: continue
+except: pass
+
+tooltip_lines.append("")
+tooltip_lines.append(f"<span foreground='{COLORS['white']}'>{'┈' * max_line_len}</span>")
+tooltip_lines.append("󰍽 LMB: Btop")
+
+save_history(cpu_history, per_core_history)
+
+TERMINAL = os.environ.get("TERMINAL") or shutil.which("alacritty") or "xterm"
+if os.environ.get("WAYBAR_CLICK_TYPE") == "left":
+    subprocess.Popen([TERMINAL, "-e", "btop"])
+
+print(json.dumps({
+    "text": f"{CPU_ICON_GENERAL} <span foreground='{get_color(max_cpu_temp,'cpu_gpu_temp')}'>{max_cpu_temp}°C</span>",
+    "tooltip": f"<span size='14000'>{'\n'.join(tooltip_lines)}</span>",
+    "markup": "pango",
+    "class": "cpu",
+    "click-events": True
+}))
+-------------------------------------------------------------------------------------------------
+memory
+#!/usr/bin/env python3
+# ----------------------------------------------------------------------------
+# WAYBAR MEMORY MODULE
+# ----------------------------------------------------------------------------
+# A dynamic memory monitor for Waybar.
+# Features:
+# - Real-time RAM usage with color-coded states
+# - Tooltip with detailed breakdown (Used, Cached, Buffers)
+# - Auto-detects memory modules via dmidecode (requires sudo permissions)
+# - Temperature monitoring (requires lm_sensors)
+# ----------------------------------------------------------------------------
+
+import json
+import psutil
+import subprocess
+import re
+import pathlib
+import sys
+
+# ---------------------------------------------------
+# CONFIGURATION
+# ---------------------------------------------------
+MEM_ICON = ""
+TOOLTIP_WIDTH = 48
+
+# ---------------------------------------------------
+# THEME & COLORS
+# ---------------------------------------------------
+# Attempts to load colors from a TOML theme file.
+# Defaults to a standard palette if the file is missing.
+try:
+    import tomllib
+except ImportError:
+    tomllib = None
+
+def load_theme_colors():
+    # UPDATE THIS PATH to your specific theme file if you have one
+    theme_path = pathlib.Path.home() / ".config/waybar/colors.toml"
+    
+    defaults = {
+        "black": "#000000", "red": "#ff0000", "green": "#00ff00", "yellow": "#ffff00",
+        "blue": "#0000ff", "magenta": "#ff00ff", "cyan": "#00ffff", "white": "#ffffff",
+        "bright_black": "#555555", "bright_red": "#ff5555", "bright_green": "#55ff55",
+        "bright_yellow": "#ffff55", "bright_blue": "#5555ff", "bright_magenta": "#ff55ff",
+        "bright_cyan": "#55ffff", "bright_white": "#ffffff"
+    }
+
+    if not tomllib or not theme_path.exists():
+        return defaults
+
+    try:
+        data = tomllib.loads(theme_path.read_text())
+        colors = data.get("colors", {})
+        normal = colors.get("normal", {})
+        bright = colors.get("bright", {})
+        
+        # Merge loaded colors with defaults
+        return {**defaults, **normal, **{f"bright_{k}": v for k, v in bright.items()}}
+    except Exception:
+        return defaults
+
+COLORS = load_theme_colors()
+
+SECTION_COLORS = {
+    "Memory":  {"icon": COLORS["green"],  "text": COLORS["green"]},
+}
+
+# Color thresholds for metrics
+COLOR_TABLE = [
+    {"color": COLORS["blue"],           "mem_storage": (0.0, 10), "mem_temp": (0, 40)},
+    {"color": COLORS["cyan"],           "mem_storage": (10.0, 20), "mem_temp": (41, 50)},
+    {"color": COLORS["green"],          "mem_storage": (20.0, 40), "mem_temp": (51, 60)},
+    {"color": COLORS["yellow"],         "mem_storage": (40.0, 60), "mem_temp": (61, 70)},
+    {"color": COLORS["bright_yellow"],  "mem_storage": (60.0, 80), "mem_temp": (71, 75)},
+    {"color": COLORS["bright_red"],     "mem_storage": (80.0, 90), "mem_temp": (76, 80)},
+    {"color": COLORS["red"],            "mem_storage": (90.0,100), "mem_temp": (81, 999)}
+]
+
+def get_color(value, metric_type):
+    if value is None: return "#ffffff"
+    try:
+        value = float(value)
+    except ValueError: return "#ffffff"
+    
+    for entry in COLOR_TABLE:
+        if metric_type in entry:
+            low, high = entry[metric_type]
+            if low <= value <= high:
+                return entry["color"]
+    return COLOR_TABLE[-1]["color"]
+
+# ---------------------------------------------------
+# HARDWARE DETECTION
+# ---------------------------------------------------
+def get_memory_temps():
+    """
+    Reads memory temperatures from lm_sensors.
+    Requires: lm_sensors installed and sensors-detect run.
+    """
+    temps = []
+    try:
+        output = subprocess.check_output(["sensors", "-j"], text=True, stderr=subprocess.DEVNULL)
+        data = json.loads(output)
+        for chip, content in data.items():
+            if any(x in chip for x in ["jc42", "spd", "dram"]):
+                for feature, subfeatures in content.items():
+                    if isinstance(subfeatures, dict):
+                        for key, val in subfeatures.items():
+                            if "input" in key:
+                                temps.append(int(val))
+    except Exception:
+        pass
+    return temps
+
+def get_memory_modules_from_dmidecode():
+    """
+    Fetches RAM stick details.
+    NOTE: Requires sudo permissions for dmidecode without password.
+    Add this to sudoers: user ALL=(root) NOPASSWD: /usr/sbin/dmidecode
+    """
+    detected_modules = []
+    real_temps = get_memory_temps()
+    try:
+        output = subprocess.check_output(["sudo", "/usr/sbin/dmidecode", "--type", "memory"], text=True, stderr=subprocess.PIPE)
+        
+        current_module = {}
+        for line in output.splitlines():
+            line = line.strip()
+            if line.startswith("Memory Device"):
+                if current_module and current_module.get("size") and current_module["size"] != "No Module Installed":
+                    detected_modules.append(current_module)
+                
+                t_val = real_temps[len(detected_modules)] if len(detected_modules) < len(real_temps) else 0
+                current_module = {"temp": t_val}
+            elif current_module:
+                if line.startswith("Locator:"):
+                    current_module["label"] = line.split(":", 1)[1].strip()
+                elif line.startswith("Size:"):
+                    size_str = line.split(":", 1)[1].strip()
+                    if "MB" in size_str:
+                        try:
+                            size_mb = int(size_str.replace("MB", "").strip())
+                            if size_mb >= 1024:
+                                current_module["size"] = f"{size_mb // 1024} GB"
+                            else:
+                                current_module["size"] = size_str
+                        except ValueError:
+                            current_module["size"] = size_str
+                    else:
+                        current_module["size"] = size_str
+                elif line.startswith("Type:"):
+                    current_module["type"] = line.split(":", 1)[1].strip()
+                elif line.startswith("Speed:"):
+                    speed_str = line.split(":", 1)[1].strip()
+                    if "MT/s" in speed_str:
+                        current_module["speed"] = speed_str.replace("MT/s", "MHz")
+                    else:
+                        current_module["speed"] = speed_str
+        
+        if current_module and current_module.get("size") and current_module["size"] != "No Module Installed":
+            detected_modules.append(current_module)
+
+    except Exception:
+        # Fail silently or return empty if sudo not configured
+        return []
+    
+    return detected_modules
+
+# ---------------------------------------------------
+# MAIN LOGIC
+# ---------------------------------------------------
+mem = psutil.virtual_memory()
+mem_used_gb = mem.used / (1024**3)
+mem_total_gb = mem.total / (1024**3)
+mem_percent = mem.percent
+mem_available_gb = mem.available / (1024**3)
+mem_cached_gb = mem.cached / (1024**3) if hasattr(mem, 'cached') else 0
+mem_buffers_gb = mem.buffers / (1024**3) if hasattr(mem, 'buffers') else 0
+
+tooltip_lines = []
+
+# Header
+tooltip_lines.append(
+    f"<span foreground='{SECTION_COLORS['Memory']['icon']}'>{MEM_ICON}</span> "
+    f"<span foreground='{SECTION_COLORS['Memory']['text']}'>Memory</span>"
+)
+tooltip_lines.append("─" * TOOLTIP_WIDTH)
+tooltip_lines.append(f"󰓅 | Usage: <span foreground='{get_color(mem_percent,'mem_storage')}'>{mem_used_gb:.0f} GB</span> used / {mem_total_gb:.0f} GB Total")
+
+memory_modules = get_memory_modules_from_dmidecode()
+max_line_len = TOOLTIP_WIDTH 
+
+# Module Table
+if memory_modules:
+    rows = []
+    for mod in memory_modules:
+        t_val = mod.get('temp', 0)
+        rows.append({
+            "icon": MEM_ICON,
+            "label": mod.get("label", "DIMM"),
+            "size": mod.get("size", "N/A"),
+            "speed": mod.get("speed", "N/A"),
+            "type": mod.get("type", "DDR4"),
+            "temp_text": f"{t_val}°C",
+            "temp_val": t_val
+        })
+
+    # Calculate column widths
+    w_label = max(len(r["label"]) for r in rows)
+    w_size = max(len(r["size"]) for r in rows)
+    w_speed = max(len(r["speed"]) for r in rows)
+    w_type = max(len(r["type"]) for r in rows)
+    w_temp = max(len(r["temp_text"]) for r in rows)
+
+    tooltip_lines.append("")
+    for r in rows:
+        temp_colored = f"<span foreground='{get_color(r['temp_val'], 'mem_temp')}'>{r['temp_text']:>{w_temp}}</span>"
+        line = (
+            f"{r['icon']} | "
+            f"{r['label']:<{w_label}} | "
+            f"{r['size']:<{w_size}} | "
+            f"{r['type']:<{w_type}} | "
+            f"{r['speed']:<{w_speed}} | "
+            f"{temp_colored}"
+        )
+        tooltip_lines.append(line)
+
+tooltip_lines.append("")
+
+# Calculate max temp for connectors
+max_mem_temp = 0
+if memory_modules:
+    max_mem_temp = max(m.get('temp', 0) for m in memory_modules)
+
+connector_color = get_color(max_mem_temp, 'mem_temp')
+frame_color = COLORS['white']
+
+# Calculate percentages
+used_pct = (mem.used / mem.total) * 100
+cached_pct = (mem.cached / mem.total) * 100 if hasattr(mem, 'cached') else 0
+buffers_pct = (mem.buffers / mem.total) * 100 if hasattr(mem, 'buffers') else 0
+free_pct = max(0, 100.0 - used_pct - cached_pct - buffers_pct)
+
+# Graphic Dimensions
+graph_width = max_line_len - 2
+inner_width = graph_width - 4
+bar_len = inner_width - 2
+padding = " " * int((max_line_len - graph_width) // 2)
+
+def c(text, color):
+    return f"<span foreground='{color}'>{text}</span>"
+
+# Line 1
+tooltip_lines.append(f"{padding} {c('╭' + '─'*inner_width + '╮', frame_color)}")
+# Line 2
+tooltip_lines.append(f"{padding}{c('╭╯', frame_color)}{c('░'*inner_width, connector_color)}{c('╰╮', frame_color)}")
+# Line 3 (Bar)
+c_used = int((used_pct / 100.0) * bar_len)
+c_cached = int((cached_pct / 100.0) * bar_len)
+c_buffers = int((buffers_pct / 100.0) * bar_len)
+c_free = bar_len - c_used - c_cached - c_buffers
+if c_free < 0: c_free = 0
+
+bar_str = (
+    f"<span foreground='{COLORS['red']}'>{'█' * c_used}</span>"
+    f"<span foreground='{COLORS['yellow']}'>{'█' * c_cached}</span>"
+    f"<span foreground='{COLORS['cyan']}'>{'█' * c_buffers}</span>"
+    f"<span foreground='{COLORS['bright_black']}'>{'█' * c_free}</span>"
+)
+tooltip_lines.append(f"{padding}{c('╰╮', frame_color)}{c('░', connector_color)}{bar_str}{c('░', connector_color)}{c('╭╯', frame_color)}")
+# Line 4
+tooltip_lines.append(f"{padding} {c('│', frame_color)}{c('░'*inner_width, connector_color)}{c('│', frame_color)}")
+# Line 5
+tooltip_lines.append(f"{padding}{c('╭╯', frame_color)}{c('┌' + '┬'*bar_len + '┐', frame_color)}{c('╰╮', frame_color)}")
+# Line 6
+tooltip_lines.append(f"{padding}{c('└─', frame_color)}{c('┴'*inner_width, frame_color)}{c('─┘', frame_color)}")
+
+tooltip_lines.append("─" * max_line_len)
+
+legend = (
+    f"<span size='11000'>"
+    f"<span foreground='{COLORS['red']}'>█</span> Used {used_pct:.1f}%  "
+    f"<span foreground='{COLORS['yellow']}'>█</span> Cached {cached_pct:.1f}%  "
+    f"<span foreground='{COLORS['cyan']}'>█</span> Buffers {buffers_pct:.1f}%  "
+    f"<span foreground='{COLORS['bright_black']}'>█</span> Free {free_pct:.1f}%"
+    f"</span>"
+)
+tooltip_lines.append(legend)
+
+print(json.dumps({
+    "text": f"{MEM_ICON} <span foreground='{get_color(mem_percent,'mem_storage')}'>{mem_percent}%</span>",
+    "tooltip": f"<span size='14000'>{'\n'.join(tooltip_lines)}</span>",
+    "markup": "pango",
+    "class": "memory",
+}))
+----------------------------------------------------------------------------------------------------------
+waybar
+"modules-right": [
+    "custom/cpu",
+    "custom/gpu",
+    "custom/memory",
+    "custom/storage",
+],
+
+    
+    "custom/storage": {
+        "format": "{}",
+        "return-type": "json",
+        "interval": 5,
+        "exec": "~/.config/waybar/scripts/waybar-storage.py",
+        "on-click": "baobab", // Set to your own analyser if you like
+        "on-click-right": "gnome-disks" // as above
+    },
+
+    "custom/memory": {
+        "format": "{}",
+        "return-type": "json",
+        "interval": 5,
+        "exec": "~/.config/waybar/scripts/waybar-memory.py",
+        "on-click": "btop" // Opens btop directly
+    },
+
+    "custom/cpu": {
+        "format": "{}",
+        "return-type": "json",
+        "interval": 5,
+        "exec": "~/.config/waybar/scripts/waybar-cpu.py",
+        "on-click": "btop" // Opens btop directly
+    },
+
+    "custom/gpu": {
+        "format": "{}",
+        "return-type": "json",
+        "interval": 5,
+        "exec": "~/.config/waybar/scripts/waybar-gpu.py",
+        "on-click": "btop" // Opens btop directly
+    },
+-------------------------------------------------------------------
